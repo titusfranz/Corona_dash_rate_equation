@@ -1,0 +1,4 @@
+# At a minimum, make sure .gitignore file contains these items
+*.pyc
+.DS_Store
+.env
