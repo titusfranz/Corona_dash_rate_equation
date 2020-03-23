@@ -1,160 +1,272 @@
 import dash
+import dash_bootstrap_components as dbc
 import dash_core_components as dcc
 import dash_html_components as html
-from dash.dependencies import Input, Output
-
-import plotly.graph_objs as go
 import numpy as np
-from scipy.integrate import odeint
 import pandas as pd
+from dash.dependencies import Input, Output, State
+from dash.exceptions import PreventUpdate
+import plotly.graph_objs as go
+from lmfit import Parameters
 
 from get_data import get_corona_data
-
-
-def f(y, t, params):
-    I, S, D, R = y      # unpack current values of y
-    rI, rR, dI,ks,ka,q = params  # unpack parameters
-    derivs = [rI*I*S*(q*ks+(1-q)*ka)-I*rR-I*dI,      # list of dy/dt=f functions
-             -rI*I*S*(q*ks+(1-q)*ka),
-             I*dI,
-             rR*I]
-    return derivs
+from logistic_model import logistic_function, LogisticModel
 
 COLORS = ['rgb(31, 119, 180)', 'rgb(255, 127, 14)',
-                       'rgb(44, 160, 44)', 'rgb(214, 39, 40)',
-                       'rgb(148, 103, 189)', 'rgb(140, 86, 75)',
-                       'rgb(227, 119, 194)', 'rgb(127, 127, 127)',
-                       'rgb(188, 189, 34)', 'rgb(23, 190, 207)']
+          'rgb(44, 160, 44)', 'rgb(214, 39, 40)',
+          'rgb(148, 103, 189)', 'rgb(140, 86, 75)',
+          'rgb(227, 119, 194)', 'rgb(127, 127, 127)',
+          'rgb(188, 189, 34)', 'rgb(23, 190, 207)']
 
-# Parameters
-rI = 0.1          # rate of infection
-rR = 0.5          # rate of recovery
-dI = 0.01         # rate of death
-ks = 0.05         # sociability constant (to symptomatic infected)
-ka = 0.1          # sociability constant (to asymptomatic infected)
-q = 0.8          # percentage of infected becoming symptomatic
-
-# Initial values
-I0 = 1     # initial angular displacement
-S0 = 99     # initial angular velocity
-D0 = 0.0
-R0 = 0.0
-
-# Bundle initial conditions for ODE solver
-y0 = [I0, S0, D0, R0]
-
-# Make time array for solution
-tStop = 200.
-tInc = 0.5
-t = np.arange(0., tStop, tInc)
-
-# Call the ODE solver
-
-external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
+external_stylesheets = [dbc.themes.BOOTSTRAP, 'https://codepen.io/chriddyp/pen/bWLwgP.css']
 
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 
 server = app.server
 
-app.layout = html.Div(
+app.layout = dbc.Container(
     children=[
-
-        html.Table(id='corona-data', children=get_corona_data().reset_index().to_json(), style={'display': 'none'}),
-        html.Table(id='population-data', style={'display': 'none'}),
-        html.H1(children='Corona - Ratenmodell'),
-
-        html.H2(children='Load data'),
-        html.Button('Reload data', id='reload-button'),
-        html.Button('Fit data', id='fit-button'),
-        dcc.Dropdown(id='country-dropdown', value='Germany'),
-
-        dcc.Graph(
-            id='simulation-graph',
+        dcc.Store(id='corona-data', ),
+        dcc.Store(id='population-data'),
+        html.Div(
+            [
+                dbc.Row(
+                    [
+                        dbc.Col(html.Button('Daten neu laden.', id='reload-button'), width='auto'),
+                        dbc.Col(dcc.Dropdown(
+                            options=[{'label': country, 'value': country} for country in ('Germany', 'France')],
+                            id='country-dropdown',
+                            value='Germany',
+                        )),
+                        dbc.Col(html.Button('Daten fitten', id='fit-button'), width='auto')
+                    ]
+                ),
+                dcc.Graph(id='figure'),
+                dbc.Row(
+                    [
+                        dbc.Col(dbc.ButtonGroup(
+                            [
+                                dbc.Button("Linear"),
+                                dbc.Button("Logarithmisch")
+                            ]
+                        ), width='auto'),
+                        html.Label(id='range-label'),
+                        dbc.Col(dcc.RangeSlider(
+                            min=0,
+                            max=200,
+                            value=[0, 200],
+                            id='range-slider'
+                        ))
+                    ]
+                ),
+            ], style={"border": "1px black solid", "border-radius": "5px", "border-color": "grey",
+                      "padding": "12px 25px 25px 25px"}
         ),
-        html.Label(id='infection-label'),
-        dcc.Slider(
-            id='infection-slider',
-            min=0,
-            max=1,
-            step=0.01,
-            marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
-            value=0.1,
+        html.Div(
+            [
+                html.H3("Verbreitung des Virus"),
+                html.P(r"Die Infectionsrate ergibt sich aus der durchschnittlichen Anzahl an Kontakten <k>"
+                       r" und der Wahrscheinlichkeit einer Ansteckung p. Ist die Infektionsrate"
+                       r" größer als die Genesungsrate, verbreitet sich das Virus exponentiell."),
+                html.Label(id='infection-label'),
+                dcc.Slider(
+                    id='infection-slider',
+                    min=0,
+                    max=1,
+                    step=0.01,
+                    marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
+                    value=0.1,
+                    disabled=True
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dbc.FormGroup(
+                                [
+                                    dbc.Label(id='infection_probability-label'),
+                                    dcc.Slider(
+                                        id='infection_probability-slider',
+                                        min=0,
+                                        max=1,
+                                        step=0.01,
+                                        marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
+                                        value=0.1,
+                                    )
+                                ]
+                            )
+                        ),
+                        dbc.Col(
+                            dbc.FormGroup(
+                                [
+                                    html.Label(id='number_contact-label'),
+                                    dcc.Slider(
+                                        id='number_contact-slider',
+                                        min=0,
+                                        max=20,
+                                        step=0.1,
+                                        marks={np.round(i, 1): str(np.round(i, 1)) for i in np.arange(0, 20, 1.)},
+                                        value=2,
+                                    ),
+                                ]
+                            )
+                        )
+                    ]
+                ),
+                html.Label('Anfänglich Infizierte:'),
+                dcc.Input(
+                    id='initial-input',
+                    type='number',
+                    value=10
+                )
+            ], style={"border": "1px black solid", "border-radius": "5px", "border-color": "grey",
+                      "padding": "12px 25px 25px 25px"}
         ),
-        html.Label(id='recovery-label'),
-        dcc.Slider(
-            id='recovery-slider',
-            min=0,
-            max=1,
-            step=0.01,
-            marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
-            value=0.5,
-        ),
-        html.Label(id='death-label'),
-        dcc.Slider(
-            id='death-slider',
-            min=0,
-            max=0.2,
-            step=0.001,
-            marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
-            value=0.01,
-        ),
-        html.Label(id='symptomatic-label'),
-        dcc.Slider(
-            id='symptomatic-slider',
-            min=0,
-            max=1,
-            step=0.01,
-            marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
-            value=0.05,
-        ),
-        html.Label(id='asymptomatic-label'),
-        dcc.Slider(
-            id='asymptomatic-slider',
-            min=0,
-            max=1,
-            step=0.01,
-            marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
-            value=0.1,
-        ),
-        html.Label(id='percentage-symptomatic-label'),
-        dcc.Slider(
-            id='percentage-symptomatic-slider',
-            min=0,
-            max=1,
-            step=0.01,
-            marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
-            value=0.8,
+        html.Div(
+            [
+                html.H3("Rückgang des Virus"),
+                html.P("Sowohl Genesene als auch Gestorbene können das Virus nicht weiter verbreiten. Für die "
+                       "Ansteckung neuer infizierter ist also eine effektive Rückgangsrate relevant, die sich aus der "
+                       "Genesungsrate und Mortalität ergibt."),
+                dbc.Label(id='reduction-label'),
+                dcc.Slider(
+                    id='reduction-slider',
+                    min=0,
+                    max=1,
+                    step=0.001,
+                    marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
+                    disabled=True
+                ),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dbc.FormGroup(
+                                [
+                                    dbc.Label(id='recovery-label'),
+                                    dcc.Slider(
+                                        id='recovery-slider',
+                                        min=0,
+                                        max=1,
+                                        step=0.01,
+                                        marks={np.round(i, 2): str(np.round(i, 2)) for i in np.arange(0, 1, 0.1)},
+                                        value=0.5,
+                                    )
+                                ]
+                            )
+                        ),
+                        dbc.Col(
+                            dbc.FormGroup(
+                                [
+                                    dbc.Label(id='mortality-label'),
+                                    dcc.Slider(
+                                        id='mortality-slider',
+                                        min=0,
+                                        max=10,
+                                        step=0.1,
+                                        marks={i: str(i) + "%" for i in range(11)},
+                                        # marks={np.round(i, 1): str(np.round(i, 1)) for i in np.arange(0., 11., 1.)},
+                                        value=1,
+                                    )
+                                ]
+                            )
+                        )
+                    ]
+                )
+            ], style={"border": "1px black solid", "border-radius": "5px", "border-color": "grey",
+                      "padding": "12px 25px 25px 25px"}
         ),
     ])
 
 
 @app.callback(
-    Output('corona-data', 'children'),
-    [Input('reload-button', 'n_clicks')]
+    Output('corona-data', 'data'),
+    [Input('reload-button', 'n_clicks')],
+    [State('corona-data', 'data')]
 )
-def load_data(clicks):
-    return get_corona_data().reset_index().to_json()
+def load_data(clicks, corona_data):
+    if clicks is None:
+        raise PreventUpdate
+    data_country = get_corona_data().reset_index()
+    return data_country.to_json()
 
 
 @app.callback(
-    Output('population-data', 'children'),
-    [Input('reload-button', 'n_clicks')]
+    Output('population-data', 'data'),
+    [Input('reload-button', 'n_clicks')],
+    [State('population-data', 'data')]
 )
-def load_population_data(clicks):
+def load_population_data(clicks, data):
+    if clicks is None:
+        raise PreventUpdate
     population_url = 'https://raw.githubusercontent.com/datasets/population/master/data/population.csv'
     population = pd.read_csv(population_url)
     population = population.set_index(['Country Name', 'Year']).Value
-    return population.unstack().idxmax(axis=1).to_json()
+    return population.unstack().iloc[:, -1].to_json()
 
 
 @app.callback(
-    Output('country-dropdown', 'options'),
-    [Input('corona-data', 'children')]
+    [Output('country-dropdown', 'options'),
+     Output('range-slider', 'value')],
+    [Input('corona-data', 'modified_timestamp')],
+    [State('corona-data', 'data')]
 )
-def update_country_dropdown(data):
+def update_country_dropdown(ts, data):
+    if ts is None:
+        raise PreventUpdate
     data = pd.read_json(data)
     countries = data['Country/Region'].unique()
-    return [{'label': country, 'value': country} for country in countries]
+
+    data = data.set_index('Country/Region', inplace=False).loc['Germany']
+    data = data.set_index('Date')
+    dates = data.index.dayofyear - data.index.dayofyear[0]
+    return [{'label': country, 'value': country} for country in countries], (dates.min(), dates.max())
+
+
+@app.callback(
+    Output('range-label', 'children'),
+    [Input('range-slider', 'value')]
+)
+def update_label(values):
+    return 'Fit Bereich: Tag {} bis Tag {}'.format(values[0], values[1])
+
+
+@app.callback(
+    [Output('infection_probability-slider', 'value'),
+     Output('recovery-slider', 'value'),
+     Output('initial-input', 'value')],
+    [Input('fit-button', 'n_clicks'),
+     Input('range-slider', 'value')],
+    [State('country-dropdown', 'value'),
+     State('number_contact-slider', 'value'),
+     State('mortality-slider', 'value'),
+     State('corona-data', 'data'),
+     State('population-data', 'data')]
+)
+def fit_data(clicks, fit_range, country,
+             number_contact, mortality,
+             corona_data, population_data):
+    if clicks is None:
+        raise PreventUpdate
+    data = pd.read_json(corona_data)
+    data_country = data.set_index('Country/Region').loc[country]
+    data_country = data_country.set_index('Date')
+    dates = data_country.index.dayofyear - data_country.index.dayofyear[0]
+    data_country.index = dates
+    data_country = data_country.iloc[(data_country.index >= fit_range[0]) * (data_country.index <= fit_range[1])]
+    population = pd.read_json(population_data, typ='series').loc[country]
+
+    model = LogisticModel
+    logistic_params = Parameters()
+    logistic_params.add('infection_rate', value=0.01, min=0)
+    logistic_params.add('recover_rate', value=0.01, max=1)
+    logistic_params.add('infected_0', value=1e-3, min=0, max=1)
+    logistic_params.add('mortality', value=mortality/100, min=0, max=1, vary=False)
+    fit = model.fit(data_country['Active Cases']/population, params=logistic_params, time=data_country.index,
+                    method='powell')
+    infected_0 = fit.eval(params=fit.params, time=[-fit_range[0]])[0]
+    print(infected_0, fit.best_values['infected_0'])
+    return (fit.best_values['infection_rate']/number_contact,
+            fit.best_values['recover_rate']/(1 + mortality/100),
+            infected_0 * population)
 
 
 @app.callback(
@@ -166,6 +278,48 @@ def update_infection(value):
 
 
 @app.callback(
+    Output('infection-slider', 'value'),
+    [Input('infection_probability-slider', 'value'),
+     Input('number_contact-slider', 'value')]
+)
+def update_infection(probability, number):
+    return probability * number
+
+
+@app.callback(
+    Output('number_contact-label', 'children'),
+    [Input('number_contact-slider', 'value')]
+)
+def update_infection(value):
+    return 'Durchschnittliche anzahl Kontakte pro Tag: {}'.format(round(value, 1))
+
+
+@app.callback(
+    Output('infection_probability-label', 'children'),
+    [Input('infection_probability-slider', 'value')]
+)
+def update_infection(value):
+    return 'Wahrscheinlichkeit einer Ansteckung pro Kontakt: {}'.format(round(value, 2))
+
+
+@app.callback(
+    Output('reduction-slider', 'value'),
+    [Input('recovery-slider', 'value'),
+     Input('mortality-slider', 'value')]
+)
+def calculate_reduction(recovery, mortality):
+    return recovery * (1 + mortality/100)
+
+
+@app.callback(
+    Output('reduction-label', 'children'),
+    [Input('reduction-slider', 'value')]
+)
+def update_infection(value):
+    return 'Reductionsrate: {}'.format(round(value, 2))
+
+
+@app.callback(
     Output('recovery-label', 'children'),
     [Input('recovery-slider', 'value')]
 )
@@ -174,67 +328,54 @@ def update_infection(value):
 
 
 @app.callback(
-    Output('death-label', 'children'),
-    [Input('death-slider', 'value')]
+    Output('mortality-label', 'children'),
+    [Input('mortality-slider', 'value')]
 )
 def update_infection(value):
-    return 'Sterberate: {}'.format(round(value, 2))
+    return 'Mortalität: {}%'.format(round(value, 1))
 
 
 @app.callback(
-    Output('symptomatic-label', 'children'),
-    [Input('symptomatic-slider', 'value')]
-)
-def update_infection(value):
-    return 'Sociability constant (Symptomatisch): {}'.format(round(value, 2))
-
-
-@app.callback(
-    Output('asymptomatic-label', 'children'),
-    [Input('asymptomatic-slider', 'value')]
-)
-def update_infection(value):
-    return 'Sociability constant (Asymptomatisch): {}'.format(round(value, 2))
-
-
-@app.callback(
-    Output('percentage-symptomatic-label', 'children'),
-    [Input('percentage-symptomatic-slider', 'value')]
-)
-def update_infection(value):
-    return 'Anteil der Infizierten die Symptome zeigen: {}'.format(round(value, 2))
-
-
-@app.callback(
-    Output('simulation-graph', 'figure'),
-    [Input('infection-slider', 'value'),
+    Output('figure', 'figure'),
+    [Input('reload-button', 'n_clicks'),
+     Input('infection-slider', 'value'),
      Input('recovery-slider', 'value'),
-     Input('death-slider', 'value'),
-     Input('symptomatic-slider', 'value'),
-     Input('asymptomatic-slider', 'value'),
-     Input('percentage-symptomatic-slider', 'value'),
-     Input('corona-data', 'children'),
-     Input('population-data', 'children'),
-     Input('country-dropdown', 'value')])
-def update_figure(infection_rate, recovery_rate, death_rate, symptomatic, asymptomatic, percentage_symptomatic,
-                  corona_data, population_data, country):
+     Input('mortality-slider', 'value'),
+     Input('initial-input', 'value'),
+     Input('corona-data', 'modified_timestamp'),
+     Input('population-data', 'modified_timestamp'),
+     Input('country-dropdown', 'value')],
+    [State('range-slider', 'value'),
+     State('corona-data', 'data'),
+     State('population-data', 'data')]
+)
+def update_figure(clicks, infection_rate, recovery_rate, mortality, infected_0,
+                  corona_ts, population_ts, country, fit_range, corona_data, population_data):
+    if corona_ts is None:
+        raise PreventUpdate
     data = pd.read_json(corona_data)
     data_country = data.set_index('Country/Region').loc[country]
     data_country = data_country.set_index('Date')
     dates = data_country.index.dayofyear - data_country.index.dayofyear[0]
     population = pd.read_json(population_data, typ='series').loc[country]
+    dates_fit = np.linspace(fit_range[0], fit_range[1], 50)
 
-    params = [infection_rate, recovery_rate, death_rate, symptomatic, asymptomatic, percentage_symptomatic]
-    psoln = odeint(f, y0, dates, args=(params,)) * population
+    infected, recovered, deaths = logistic_function(
+        dates_fit, infection_rate=infection_rate, recover_rate=recovery_rate, mortality=mortality/100,
+        infected_0=infected_0/population
+    )
 
     return {
         'data': [
-             {'x': dates, 'y': psoln[:, 0], 'type': 'line', 'name': 'Infizierte'},
-             {'x': dates, 'y': psoln[:, 3], 'type': 'line', 'name': 'Genesene'},
-             {'x': dates, 'y': psoln[:, 2], 'type': 'line', 'name': 'Verstorbene'},
-             # {'x': dates, 'y': data_country['Active Cases'], 'type': 'line', 'name': 'Infizierte'},
+             {'x': dates_fit, 'y': population * infected, 'type': 'line', 'name': 'Infizierte'},
+             {'x': dates_fit, 'y': population * recovered, 'type': 'line', 'name': 'Genesene'},
+             {'x': dates_fit, 'y': population * deaths, 'type': 'line', 'name': 'Verstorbene'},
              go.Scatter(x=dates, y=data_country['Active Cases'], name='Infizierte',
-                        mode='markers', marker_color='#1f77b4')
+                        mode='markers', marker_color=COLORS[0]),
+             go.Scatter(x=dates, y=data_country['Total Recoveries'], name='Genesene',
+                        mode='markers', marker_color=COLORS[1]),
+             go.Scatter(x=dates, y=data_country['Total Deaths'], name='Verstorbene',
+                        mode='markers', marker_color=COLORS[2])
         ],
         'layout': dict(
             xaxis={'title': 'Zeit'},
