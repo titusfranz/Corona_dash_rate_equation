@@ -1,3 +1,5 @@
+lmfit
+pandas
 scipy
 certifi==2019.11.28
 click==7.1.1
@@ -20,3 +22,4 @@ retrying==1.3.3
 six==1.14.0
 Werkzeug==1.0.0
 wincertstore==0.2
+dash_bootstrap_components
